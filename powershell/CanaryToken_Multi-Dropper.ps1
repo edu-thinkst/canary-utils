@@ -1,7 +1,7 @@
 #Canary Token Multi-Dropper
 Param (
     [string]$Domain = 'ABC123.canary.tools', # Enter your Console domain between the . e.g. 1234abc.canary.tools
-    [string]$FactoryAuth = 'ABC123', # Enter your Factory auth key. e.g a1bc3e769fg832hij3 Docs available here. https://docs.canary.tools/canarytokens/factory.html#create-canarytoken-factory-auth-string
+    [string]$CDK = 'ABC123', # Enter your Canary Deployment auth key. e.g a1bc3e769fg832hij3 Docs available here. https://docs.canary.tools/guide/getting-started.html#api-details
     [string]$intro = 'ON'
     )
 
@@ -38,7 +38,7 @@ else {
 #Drops an AWS API Token
 function Deploy-Token_AWS{
     param (
-        [string]$TokenType = 'aws-id' , # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/factory.html#list-canarytokens-available-via-canarytoken-factory
+        [string]$TokenType = 'aws-id' , # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/actions.html#list-kinds-of-canarytokens
         [string]$TokenFilename = "aws-keys.txt", # Desired Token file name.
         [string]$TargetDirectory = "c:\aws_directory" # Local location to drop the token into.
     )
@@ -55,22 +55,22 @@ function Deploy-Token_AWS{
     }
     
     $PostData = @{
-        factory_auth = "$FactoryAuth"
+        auth_token = "$CDK"
         kind       = "$TokenType"
-        memo       = "$([System.Net.Dns]::GetHostName()) - $TargetDirectory"
+        memo       = "$([System.Net.Dns]::GetHostName()) - $OutputFileName"
     }
     
-    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/factory/create" -Body $PostData
+    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/create" -Body $PostData
     $Result = $CreateResult.result
     If ($Result -ne 'success') {
         Write-Host -ForegroundColor Red "[X] Creation of $OutputFileName failed."
-        Exit
+        return
     }
     Else {
         $TokenID = $($CreateResult).canarytoken.canarytoken
     }
     
-    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/factory/download?factory_auth=$FactoryAuth&canarytoken=$TokenID" -OutFile "$OutputFileName"
+    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/download?auth_token=$CDK&canarytoken=$TokenID" -OutFile "$OutputFileName"
     Write-Host -ForegroundColor Green "[*] Token Script for: '$OutputFileName'. Complete on $env:computername"
 }
 
@@ -81,15 +81,23 @@ Deploy-Token_AWS
 # Drops an Azure API Token
 function Deploy-Token_Azure{
     param (
-        [string]$TokenType = 'azure-id' , # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/factory.html#list-canarytokens-available-via-canarytoken-factory
-        [string]$TokenFilename = 'azure_prod', # Desired Token file name.
+        [string]$TokenType = 'azure-id' , # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/actions.html#list-kinds-of-canarytokens
+        [string]$TokenFilename = 'azure_prod.zip', # Desired downloaded archive name.
+        [string]$CertName = 'prod.pem', # Certificate path/name referenced by the generated Azure config.
         [string]$TargetDirectory = "c:\azure_token" # Local location to drop the token into.
     )
 
-    $OutputFileName = "$TargetDirectory\$TokenFilename.zip"
+    $OutputFileName = Join-Path $TargetDirectory $TokenFilename
+    $CertOutputFileName = Join-Path $TargetDirectory $CertName
+    $ConfigOutputPath = Join-Path $TargetDirectory 'config'
 
-    If ((Test-Path $OutputFileName)) {
-        Write-Host -ForegroundColor Yellow "[*] '$OutputFileName' exists, skipping..."
+    # Avoid creating token if it already exists.
+    If (Test-Path $CertOutputFileName) {
+        Write-Host -ForegroundColor Yellow "[*] '$CertOutputFileName' exists, skipping..."
+        return
+    }
+    If (Test-Path $ConfigOutputPath) {
+        Write-Host -ForegroundColor Yellow "[*] Azure config '$ConfigOutputPath' already exists, skipping..."
         return
     }
 
@@ -98,28 +106,38 @@ function Deploy-Token_Azure{
     }
     
     $PostData = @{
-        factory_auth = "$FactoryAuth"
-        kind       = "$TokenType"
-        azure_id_cert_file_name = "$TokenFilename"
-        memo       = "$([System.Net.Dns]::GetHostName()) - $TargetDirectory"
+        auth_token              = "$CDK"
+        kind                    = "$TokenType"
+        azure_id_cert_file_name = "$CertName"
+        memo                    = "$([System.Net.Dns]::GetHostName()) - $CertOutputFileName"
     }
     
-    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/factory/create" -Body $PostData
-    $Result = $CreateResult.result
-    If ($Result -ne 'success') {
+    try {
+        $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/create" -Body $PostData -ErrorAction Stop
+    }
+    catch {
+        Write-Host -ForegroundColor Red "[X] Token creation request failed for ${OutputFileName}: $($_.Exception.Message)"
+        return
+    }
+
+    If ($CreateResult.result -ne 'success') {
         Write-Host -ForegroundColor Red "[X] Creation of $OutputFileName failed."
-        Exit
+        return
     }
-    Else {
-        $TokenID = $($CreateResult).canarytoken.canarytoken
+
+    $TokenID = $CreateResult.canarytoken.canarytoken
+
+    try {
+        Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/download?auth_token=$CDK&canarytoken=$TokenID" -OutFile "$OutputFileName" -ErrorAction Stop
+        Expand-Archive $OutputFileName -DestinationPath $TargetDirectory -ErrorAction Stop
+        Remove-Item $OutputFileName -Force
     }
-    
-    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/factory/download?factory_auth=$FactoryAuth&canarytoken=$TokenID" -OutFile "$OutputFileName"
+    catch {
+        Write-Host -ForegroundColor Red "[X] Azure token download/extraction failed: $($_.Exception.Message)"
+        return
+    }
 
-    Expand-Archive $OutputFileName -DestinationPath $TargetDirectory
-    Remove-Item $OutputFileName
-
-    Write-Host -ForegroundColor Green "[*] Token Script for: '$OutputFileName' complete on $env:computername"
+    Write-Host -ForegroundColor Green "[*] Azure Token deployed to: '$TargetDirectory'. Complete on $env:computername"
 }
 
 Deploy-Token_Azure
@@ -129,7 +147,7 @@ Deploy-Token_Azure
 # Drops a DNS Token as a batch script.
 function Deploy-Token_DNS{
     param (
-        [string]$TokenType = 'dns', # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/factory.html#list-canarytokens-available-via-canarytoken-factory
+        [string]$TokenType = 'dns', # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/actions.html#list-kinds-of-canarytokens
         [string]$TokenFilename = "runme.bat", # Desired Token file name.
         [string]$TargetDirectory = "c:\dns_directory" # Local location to drop the token into.
     )
@@ -146,16 +164,16 @@ function Deploy-Token_DNS{
     }
     
     $PostData = @{
-        factory_auth = "$FactoryAuth"
+        auth_token = "$CDK"
         kind       = "$TokenType"
-        memo       = "$([System.Net.Dns]::GetHostName()) - $TargetDirectory"
+        memo       = "$([System.Net.Dns]::GetHostName()) - $OutputFileName"
     }
     
-    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/factory/create" -Body $PostData
+    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/create" -Body $PostData
     $Result = $CreateResult.result
     If ($Result -ne 'success') {
         Write-Host -ForegroundColor Red "[X] Creation of $OutputFileName failed."
-        Exit
+        return
     }
     Else {
         $Tokenhostname = $($CreateResult).canarytoken.hostname
@@ -174,7 +192,7 @@ Deploy-Token_DNS
 #Drops an Excel Token
 function Deploy-Token_Excel{
     param (
-        [string]$TokenType = 'doc-msexcel' , # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/factory.html#list-canarytokens-available-via-canarytoken-factory
+        [string]$TokenType = 'doc-msexcel' , # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/actions.html#list-kinds-of-canarytokens
         [string]$TokenFilename = "excel.xlsx", # Desired Token file name.
         [string]$TargetDirectory = "c:\excel_directory" # Local location to drop the token into.
     )
@@ -191,22 +209,22 @@ function Deploy-Token_Excel{
     }
     
     $PostData = @{
-        factory_auth = "$FactoryAuth"
+        auth_token = "$CDK"
         kind       = "$TokenType"
-        memo       = "$([System.Net.Dns]::GetHostName()) - $TargetDirectory"
+        memo       = "$([System.Net.Dns]::GetHostName()) - $OutputFileName"
     }
     
-    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/factory/create" -Body $PostData
+    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/create" -Body $PostData
     $Result = $CreateResult.result
     If ($Result -ne 'success') {
         Write-Host -ForegroundColor Red "[X] Creation of $OutputFileName failed."
-        Exit
+        return
     }
     Else {
         $TokenID = $($CreateResult).canarytoken.canarytoken
     }
     
-    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/factory/download?factory_auth=$FactoryAuth&canarytoken=$TokenID" -OutFile "$OutputFileName"
+    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/download?auth_token=$CDK&canarytoken=$TokenID" -OutFile "$OutputFileName"
     Write-Host -ForegroundColor Green "[*] Token Script for: '$OutputFileName'. Complete on $env:computername"
 }
 
@@ -217,7 +235,7 @@ Deploy-Token_Excel
 #Drops an Excel-Macro Token
 function Deploy-Token_Excel_Macro{
     param (
-        [string]$TokenType = 'msexcel-macro' , # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/factory.html#list-canarytokens-available-via-canarytoken-factory
+        [string]$TokenType = 'msexcel-macro' , # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/actions.html#list-kinds-of-canarytokens
         [string]$TokenFilename = "excel-macro.xlsm", # Desired Token file name.
         [string]$TargetDirectory = "c:\excel_macro_directory" # Local location to drop the token into.
     )
@@ -234,22 +252,22 @@ function Deploy-Token_Excel_Macro{
     }
     
     $PostData = @{
-        factory_auth = "$FactoryAuth"
+        auth_token = "$CDK"
         kind       = "$TokenType"
-        memo       = "$([System.Net.Dns]::GetHostName()) - $TargetDirectory"
+        memo       = "$([System.Net.Dns]::GetHostName()) - $OutputFileName"
     }
     
-    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/factory/create" -Body $PostData
+    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/create" -Body $PostData
     $Result = $CreateResult.result
     If ($Result -ne 'success') {
         Write-Host -ForegroundColor Red "[X] Creation of $OutputFileName failed."
-        Exit
+        return
     }
     Else {
         $TokenID = $($CreateResult).canarytoken.canarytoken
     }
     
-    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/factory/download?factory_auth=$FactoryAuth&canarytoken=$TokenID" -OutFile "$OutputFileName"
+    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/download?auth_token=$CDK&canarytoken=$TokenID" -OutFile "$OutputFileName"
     Write-Host -ForegroundColor Green "[*] Token Script for: '$OutputFileName'. Complete on $env:computername"
 }
 
@@ -260,7 +278,7 @@ Deploy-Token_Excel_Macro
 # Drops a Windows Folder Token
 function Deploy-Token_Folder{
     param (
-        [string]$TokenType = 'windows-dir', # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/factory.html#list-canarytokens-available-via-canarytoken-factory
+        [string]$TokenType = 'windows-dir', # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/actions.html#list-kinds-of-canarytokens
         [string]$TargetFolderName = "Folder_Token", # Desired Token Folder name.
         [string]$TargetDirectory = "c:\folder_directory", # Local location to drop the token into.
         [string]$TempZipFilename = "token-folder.zip" 
@@ -278,16 +296,16 @@ function Deploy-Token_Folder{
     }
     
     $PostData = @{
-        factory_auth = "$FactoryAuth"
+        auth_token = "$CDK"
         kind       = "$TokenType"
-        memo       = "$([System.Net.Dns]::GetHostName()) - $TargetDirectory"
+        memo       = "$([System.Net.Dns]::GetHostName()) - $OutputFileName"
     }
     
-    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/factory/create" -Body $PostData
+    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/create" -Body $PostData
     $Result = $CreateResult.result
     If ($Result -ne 'success') {
         Write-Host -ForegroundColor Red "[X] Creation of $OutputFileName failed."
-        Exit
+        return
     }
     Else {
         $TokenID = $($CreateResult).canarytoken.canarytoken
@@ -310,7 +328,7 @@ function Deploy-Token_Folder{
 #        }
 #    }
 
-    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/factory/download?factory_auth=$FactoryAuth&canarytoken=$TokenID" -OutFile "$TargetDirectory\$TempZipFilename"
+    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/download?auth_token=$CDK&canarytoken=$TokenID" -OutFile "$TargetDirectory\$TempZipFilename"
     Expand-Archive $TargetDirectory\$TempZipFilename -DestinationPath $TargetDirectory\
     Remove-item $TargetDirectory\$TempZipFilename
     Rename-Item "$TargetDirectory\My Documents" "$TargetDirectory\$TargetFolderName"
@@ -326,7 +344,7 @@ Deploy-Token_Folder
 #Drops a PDF Token
 function Deploy-Token_PDF{
     param (
-        [string]$TokenType = 'pdf-acrobat-reader' , # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/factory.html#list-canarytokens-available-via-canarytoken-factory
+        [string]$TokenType = 'pdf-acrobat-reader' , # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/actions.html#list-kinds-of-canarytokens
         [string]$TokenFilename = "PDF_Doc.pdf", # Desired Token file name.
         [string]$TargetDirectory = "c:\pdf_directory" # Local location to drop the token into.
     )
@@ -344,22 +362,22 @@ function Deploy-Token_PDF{
     
     
     $PostData = @{
-        factory_auth = "$FactoryAuth"
+        auth_token = "$CDK"
         kind       = "$TokenType"
-        memo       = "$([System.Net.Dns]::GetHostName()) - $TargetDirectory"
+        memo       = "$([System.Net.Dns]::GetHostName()) - $OutputFileName"
     }
     
-    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/factory/create" -Body $PostData
+    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/create" -Body $PostData
     $Result = $CreateResult.result
     If ($Result -ne 'success') {
         Write-Host -ForegroundColor Red "[X] Creation of $OutputFileName failed."
-        Exit
+        return
     }
     Else {
         $TokenID = $($CreateResult).canarytoken.canarytoken
     }
     
-    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/factory/download?factory_auth=$FactoryAuth&canarytoken=$TokenID" -OutFile "$OutputFileName"
+    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/download?auth_token=$CDK&canarytoken=$TokenID" -OutFile "$OutputFileName"
     Write-Host -ForegroundColor Green "[*] Token Script for: '$OutputFileName'. Complete on $env:computername"
 }
 
@@ -370,7 +388,7 @@ Deploy-Token_PDF
 #Drops a QR-Code Token
 function Deploy-Token_QR{
     param (
-        [string]$TokenType = 'qr-code' , # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/factory.html#list-canarytokens-available-via-canarytoken-factory
+        [string]$TokenType = 'qr-code' , # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/actions.html#list-kinds-of-canarytokens
         [string]$TokenFilename = "QR_Code.png", # Desired Token file name.
         [string]$TargetDirectory = "c:\QR_Code_directory" # Local location to drop the token into.
     )
@@ -388,22 +406,22 @@ function Deploy-Token_QR{
     
     
     $PostData = @{
-        factory_auth = "$FactoryAuth"
+        auth_token = "$CDK"
         kind       = "$TokenType"
-        memo       = "$([System.Net.Dns]::GetHostName()) - $TargetDirectory"
+        memo       = "$([System.Net.Dns]::GetHostName()) - $OutputFileName"
     }
     
-    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/factory/create" -Body $PostData
+    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/create" -Body $PostData
     $Result = $CreateResult.result
     If ($Result -ne 'success') {
         Write-Host -ForegroundColor Red "[X] Creation of $OutputFileName failed."
-        Exit
+        return
     }
     Else {
         $TokenID = $($CreateResult).canarytoken.canarytoken
     }
     
-    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/factory/download?factory_auth=$FactoryAuth&canarytoken=$TokenID" -OutFile "$OutputFileName"
+    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/download?auth_token=$CDK&canarytoken=$TokenID" -OutFile "$OutputFileName"
     Write-Host -ForegroundColor Green "[*] Token Script for: '$OutputFileName'. Complete on $env:computername"
 }
 
@@ -415,7 +433,7 @@ Deploy-Token_QR
 # Note : In order for the registry file to be imported, the script needs to be run as an Administrator
 function Deploy-Token_Sensitive_command{
     param (
-        [string]$TokenType = 'sensitive-cmd' , # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/factory.html#list-canarytokens-available-via-canarytoken-factory
+        [string]$TokenType = 'sensitive-cmd' , # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/actions.html#list-kinds-of-canarytokens
         [string]$WatchedProcess = "calc.exe" # Process you'd like to alert on
     )
     
@@ -429,23 +447,23 @@ function Deploy-Token_Sensitive_command{
     }
     
     $PostData = @{
-        factory_auth = "$FactoryAuth"
+        auth_token = "$CDK"
         kind       = "$TokenType"
         process_name = "$WatchedProcess"
         memo       = "$([System.Net.Dns]::GetHostName()) - $WatchedProcess"
     }
     
-    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/factory/create" -Body $PostData
+    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/create" -Body $PostData
     $Result = $CreateResult.result
     If ($Result -ne 'success') {
         Write-Host -ForegroundColor Red "[X] Creation of $OutputFileName failed."
-        Exit
+        return
     }
     Else {
         $TokenID = $($CreateResult).canarytoken.canarytoken
     }
     
-    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/factory/download?factory_auth=$FactoryAuth&canarytoken=$TokenID" -OutFile "$OutputFileName"
+    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/download?auth_token=$CDK&canarytoken=$TokenID" -OutFile "$OutputFileName"
     Write-Host -ForegroundColor Green "[*] Token Script for: '$OutputFileName'. Complete on $env:computername"
 
     reg import $OutputFileName /reg:32
@@ -481,7 +499,7 @@ function Deploy-Token_Signed_EXE{
     $formData = @{
     kind = "signed-exe"
     memo = "$([System.Net.Dns]::GetHostName()) - $OutputFileName"
-    factory_auth = $FactoryAuth
+    auth_token = $CDK
     }
 
     $fileContent = [System.IO.File]::ReadAllBytes($TokenTemplate)
@@ -509,11 +527,11 @@ function Deploy-Token_Signed_EXE{
         "Content-Type" = "multipart/form-data; boundary=$boundary"
     }
 
-    $response = Invoke-RestMethod -Uri "https://$Domain/api/v1/canarytoken/factory/create" -Method Post -Headers $headers -Body $bodyBytes
+    $response = Invoke-RestMethod -Uri "https://$Domain/api/v1/canarytoken/create" -Method Post -Headers $headers -Body $bodyBytes
 
     $TokenID = $response.canarytoken.canarytoken
 
-    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/factory/download?factory_auth=$FactoryAuth&canarytoken=$TokenID" -OutFile "$OutputFileName"
+    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/download?auth_token=$CDK&canarytoken=$TokenID" -OutFile "$OutputFileName"
 
     Write-Host -ForegroundColor Green "[*] Token Script for: '$OutputFileName'. Complete on $env:computername"
 }
@@ -525,7 +543,7 @@ function Deploy-Token_Signed_EXE{
 # Drops a Web Bug as a Shortcut.
 function Deploy-Token_Web{
     param (
-        [string]$TokenType = 'http', # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/factory.html#list-canarytokens-available-via-canarytoken-factory
+        [string]$TokenType = 'http', # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/actions.html#list-kinds-of-canarytokens
         [string]$TokenFilename = "example.com.url", # Desired Token file name.
         [string]$TargetDirectory = "c:\web_bug_directory" # Local location to drop the token into.
     )
@@ -542,16 +560,16 @@ function Deploy-Token_Web{
     }
     
     $PostData = @{
-        factory_auth = "$FactoryAuth"
+        auth_token = "$CDK"
         kind       = "$TokenType"
-        memo       = "$([System.Net.Dns]::GetHostName()) - $TargetDirectory"
+        memo       = "$([System.Net.Dns]::GetHostName()) - $OutputFileName"
     }
     
-    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/factory/create" -Body $PostData
+    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/create" -Body $PostData
     $Result = $CreateResult.result
     If ($Result -ne 'success') {
         Write-Host -ForegroundColor Red "[X] Creation of $OutputFileName failed."
-        Exit
+        return
     }
     Else {
         $TokenURL = $($CreateResult).canarytoken.url
@@ -572,7 +590,7 @@ Deploy-Token_Web
 # Drops a Word Token
 function Deploy-Token_Word{
     param (
-        [string]$TokenType = 'doc-msword' , # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/factory.html#list-canarytokens-available-via-canarytoken-factory
+        [string]$TokenType = 'doc-msword' , # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/actions.html#list-kinds-of-canarytokens
         [string]$TokenFilename = "secrets.docx", # Desired Token file name.
         [string]$TargetDirectory = "c:\word_directory" # Local location to drop the token into.
     )
@@ -589,22 +607,22 @@ function Deploy-Token_Word{
     }
     
     $PostData = @{
-        factory_auth = "$FactoryAuth"
+        auth_token = "$CDK"
         kind       = "$TokenType"
-        memo       = "$([System.Net.Dns]::GetHostName()) - $TargetDirectory"
+        memo       = "$([System.Net.Dns]::GetHostName()) - $OutputFileName"
     }
     
-    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/factory/create" -Body $PostData
+    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/create" -Body $PostData
     $Result = $CreateResult.result
     If ($Result -ne 'success') {
         Write-Host -ForegroundColor Red "[X] Creation of $OutputFileName failed."
-        Exit
+        return
     }
     Else {
         $TokenID = $($CreateResult).canarytoken.canarytoken
     }
     
-    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/factory/download?factory_auth=$FactoryAuth&canarytoken=$TokenID" -OutFile "$OutputFileName"
+    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/download?auth_token=$CDK&canarytoken=$TokenID" -OutFile "$OutputFileName"
     Write-Host -ForegroundColor Green "[*] Token Script for: '$OutputFileName'. Complete on $env:computername"
 }
 
@@ -615,7 +633,7 @@ Deploy-Token_Word
 #Drops a Word Macro Token
 function Deploy-Token_Word_Macro{
     param (
-        [string]$TokenType = 'doc-msword' , # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/factory.html#list-canarytokens-available-via-canarytoken-factory
+        [string]$TokenType = 'msword-macro' , # Enter your required token type. Full list available here. https://docs.canary.tools/canarytokens/actions.html#list-kinds-of-canarytokens
         [string]$TokenFilename = "secrets.docm", # Desired Token file name.
         [string]$TargetDirectory = "c:\word_macro_directory" # Local location to drop the token into.
     )
@@ -632,22 +650,22 @@ function Deploy-Token_Word_Macro{
     }
     
     $PostData = @{
-        factory_auth = "$FactoryAuth"
+        auth_token = "$CDK"
         kind       = "$TokenType"
-        memo       = "$([System.Net.Dns]::GetHostName()) - $TargetDirectory"
+        memo       = "$([System.Net.Dns]::GetHostName()) - $OutputFileName"
     }
     
-    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/factory/create" -Body $PostData
+    $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/create" -Body $PostData
     $Result = $CreateResult.result
     If ($Result -ne 'success') {
         Write-Host -ForegroundColor Red "[X] Creation of $OutputFileName failed."
-        Exit
+        return
     }
     Else {
         $TokenID = $($CreateResult).canarytoken.canarytoken
     }
     
-    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/factory/download?factory_auth=$FactoryAuth&canarytoken=$TokenID" -OutFile "$OutputFileName"
+    Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/download?auth_token=$CDK&canarytoken=$TokenID" -OutFile "$OutputFileName"
     Write-Host -ForegroundColor Green "[*] Token Script for: '$OutputFileName'. Complete on $env:computername"
 }
 
@@ -710,32 +728,36 @@ function Deploy-MySQL_Dump {
     )
 
     $OutputFileName = Join-Path $TargetDirectory $TokenFilename
+    $ExtractedFileName = Join-Path `
+        ([System.IO.Path]::GetDirectoryName($OutputFileName)) `
+        ([System.IO.Path]::GetFileNameWithoutExtension($OutputFileName))
 
     if (-not (Test-Path $TargetDirectory)) {
         New-Item -ItemType Directory -Force -ErrorAction Stop -Path $TargetDirectory > $null
     }
 
-    if (Test-Path $OutputFileName) {
-        Write-Host -ForegroundColor Yellow "[*] File already exists, $OutputFileName"
+    if (Test-Path $ExtractedFileName) {
+        Write-Host -ForegroundColor Yellow "[*] '$ExtractedFileName' already exists, skipping..."
+        return
     }
-    else {
+
+    if (-not (Test-Path $OutputFileName)) {
         $PostData = @{
-            factory_auth = "$FactoryAuth"
-            kind         = "$TokenType"
-            memo         = "$([System.Net.Dns]::GetHostName()) - $TargetDirectory"
-            industry     = "corporate"
+            auth_token = "$CDK"
+            kind       = "$TokenType"
+            memo       = "$([System.Net.Dns]::GetHostName()) - $ExtractedFileName"
+            industry   = "corporate"
         }
 
         try {
-            $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/factory/create" -Body $PostData
+            $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/create" -Body $PostData -ErrorAction Stop
         }
         catch {
             Write-Host -ForegroundColor Red "[X] Token creation request failed: $($_.Exception.Message)"
             return
         }
 
-        $Result = $CreateResult.result
-        if ($Result -ne 'success') {
+        if ($CreateResult.result -ne 'success') {
             Write-Host -ForegroundColor Red "[X] Creation of $OutputFileName failed"
             return
         }
@@ -743,7 +765,7 @@ function Deploy-MySQL_Dump {
         $TokenID = $CreateResult.canarytoken.canarytoken
 
         try {
-            Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/factory/download?factory_auth=$FactoryAuth&canarytoken=$TokenID" -OutFile $OutputFileName
+            Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/download?auth_token=$CDK&canarytoken=$TokenID" -OutFile $OutputFileName -ErrorAction Stop
             Write-Host -ForegroundColor Green "[*] Token downloaded to: $OutputFileName"
         }
         catch {
@@ -751,9 +773,16 @@ function Deploy-MySQL_Dump {
             return
         }
     }
+    else {
+        Write-Host -ForegroundColor Yellow "[*] Found existing compressed token: $OutputFileName. Extracting it instead of creating a new token."
+    }
 
-    # Extract and remove gz file
-    Expand-GZipFile -SourceFile $OutputFileName
+    Expand-GZipFile -SourceFile $OutputFileName -DestinationFile $ExtractedFileName
+
+    if (-not (Test-Path $ExtractedFileName)) {
+        Write-Host -ForegroundColor Red "[X] Expected extracted token was not created: $ExtractedFileName"
+        return
+    }
 
     Write-Host -ForegroundColor Green "[*] Token script complete on $env:COMPUTERNAME"
 }
@@ -762,9 +791,118 @@ Deploy-MySQL_Dump
 
 ####################################################################################################################################################################################################################################
 
+# Drops a Slack API Token
+function Deploy-Token_Slack{
+    param (
+        [string]$TokenType = 'slack-api',
+        [string]$TokenFilename = 'Slack_API_Keys.txt',
+        [string]$TargetDirectory = 'C:\slack_directory'
+    )
+
+    $OutputFileName = Join-Path $TargetDirectory $TokenFilename
+
+    If (Test-Path $OutputFileName) {
+        Write-Host -ForegroundColor Yellow "[*] '$OutputFileName' exists, skipping..."
+        return
+    }
+
+    If (!(Test-Path $TargetDirectory)) {
+        New-Item -ItemType Directory -Force -ErrorAction Stop -Path $TargetDirectory > $null
+    }
+
+    $PostData = @{
+        auth_token = "$CDK"
+        kind       = "$TokenType"
+        memo       = "$([System.Net.Dns]::GetHostName()) - $OutputFileName"
+    }
+
+    try {
+        $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/create" -Body $PostData -ErrorAction Stop
+    }
+    catch {
+        Write-Host -ForegroundColor Red "[X] Token creation request failed for ${OutputFileName}: $($_.Exception.Message)"
+        return
+    }
+
+    If ($CreateResult.result -ne 'success') {
+        Write-Host -ForegroundColor Red "[X] Creation of $OutputFileName failed."
+        return
+    }
+
+    $TokenID = $CreateResult.canarytoken.canarytoken
+
+    try {
+        Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/download?auth_token=$CDK&canarytoken=$TokenID" -OutFile $OutputFileName -ErrorAction Stop
+    }
+    catch {
+        Write-Host -ForegroundColor Red "[X] Download failed for ${OutputFileName}: $($_.Exception.Message)"
+        return
+    }
+
+    Write-Host -ForegroundColor Green "[*] Token Script for: '$OutputFileName'. Complete on $env:computername"
+}
+
+Deploy-Token_Slack
+
+####################################################################################################################################################################################################################################
+
+# Drops a WireGuard VPN Token
+function Deploy-Token_WireGuard{
+    param (
+        [string]$TokenType = 'wireguard',
+        [string]$TokenFilename = 'wg0.conf',
+        [string]$TargetDirectory = 'C:\wireguard_directory'
+    )
+
+    $OutputFileName = Join-Path $TargetDirectory $TokenFilename
+
+    If (Test-Path $OutputFileName) {
+        Write-Host -ForegroundColor Yellow "[*] '$OutputFileName' exists, skipping..."
+        return
+    }
+
+    If (!(Test-Path $TargetDirectory)) {
+        New-Item -ItemType Directory -Force -ErrorAction Stop -Path $TargetDirectory > $null
+    }
+
+    $PostData = @{
+        auth_token = "$CDK"
+        kind       = "$TokenType"
+        memo       = "$([System.Net.Dns]::GetHostName()) - $OutputFileName"
+    }
+
+    try {
+        $CreateResult = Invoke-RestMethod -Method Post -Uri "https://$Domain/api/v1/canarytoken/create" -Body $PostData -ErrorAction Stop
+    }
+    catch {
+        Write-Host -ForegroundColor Red "[X] Token creation request failed for ${OutputFileName}: $($_.Exception.Message)"
+        return
+    }
+
+    If ($CreateResult.result -ne 'success') {
+        Write-Host -ForegroundColor Red "[X] Creation of $OutputFileName failed."
+        return
+    }
+
+    $TokenID = $CreateResult.canarytoken.canarytoken
+
+    try {
+        Invoke-RestMethod -Method Get -Uri "https://$Domain/api/v1/canarytoken/download?auth_token=$CDK&canarytoken=$TokenID" -OutFile $OutputFileName -ErrorAction Stop
+    }
+    catch {
+        Write-Host -ForegroundColor Red "[X] Download failed for ${OutputFileName}: $($_.Exception.Message)"
+        return
+    }
+
+    Write-Host -ForegroundColor Green "[*] Token Script for: '$OutputFileName'. Complete on $env:computername"
+}
+
+Deploy-Token_WireGuard
+
+####################################################################################################################################################################################################################################
+
 # Create RDP Shortcut pointing towards a Canary and adds a entry into credential manager.
 # Note : this should be accessible from your Tokened Host.
-
 function Deploy-RDP_Shortcut{
     param (
         [string]$CanaryIP = '192.0.2.1' , # Enter your Canaries IP Address.
